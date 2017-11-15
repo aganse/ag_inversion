@@ -1,0 +1,3 @@
+## Inverse problem tools for weakly nonlinear problems
+Gradually filling these in as I shift my inversion work from Octave to Python
+over time.  As this comes together I'll start documenting but haven't yet...
