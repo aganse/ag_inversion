@@ -1,6 +1,8 @@
 import math
 import numpy as np
 from numpy.linalg import norm, lstsq
+from scipy.linalg import toeplitz
+from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator
 
@@ -38,6 +40,7 @@ def cplxMSE(a,b):
     # mean squared error that can handle complex data
     r = np.subtract(a,b)
     mse = np.dot( np.conjugate(r).T, r )
+    mse = mse/r.size
     mse = np.real(mse).item()  # result above was real but had +0j in a complex
                                # typed var so take real part, and then came back
                                # as singleton array so item() converts that to
@@ -71,6 +74,61 @@ def jacfindiff(fwdfunc,x,dx=1.0e-8):
 
 #def check_derivs()
 
+
+def fd_mtx(mlen,type='fwd',order=2,bounds=False):
+    """Produces finite difference matrices of specified type & order.
+    type = {'fwd','bkwd','ctr'}
+    order = {1,2} for first or second diffs
+    bounds = {True,False} include/not the boundary rows at top or bottom.
+             If True then matrix is square.
+    """
+    r = np.zeros(mlen)
+    c = np.zeros(mlen)
+    if type=='fwd':
+        if order==1:
+            r[0] = -1
+            r[1] = 1
+            c[0] = -1
+        elif order==2:
+            r[0] = 1
+            r[1] = -2
+            r[2] = 1
+            c[0] = 1
+    elif type=='bkwd':
+        if order==1:
+            r[0] = 1
+            c[0] = 1
+            c[1] = -1
+        elif order==2:
+            r[0] = 1
+            c[0] = 1
+            c[1] = -2
+            c[2] = 1
+    elif type=='ctr':
+        if order==1:
+            r[1] = .5
+            c[1] = -.5
+        elif order==2:
+            r[0] = -2
+            r[1] = 1
+            c[0] = -2
+            c[1] = 1
+    T = toeplitz(c,r)
+    if bounds==False:
+        if order==1 and type=='fwd':
+            T = np.delete(T, (mlen-1), axis=0)
+        elif order==1 and type=='bkwd':
+            T = np.delete(T, (0), axis=0)
+        elif order==1 and type=='ctr':
+            T = np.delete(T, (0,mlen-1), axis=0)
+        elif order==2 and type=='fwd':
+            T = np.delete(T, (mlen-2,mlen-1), axis=0)
+        elif order==2 and type=='bkwd':
+            T = np.delete(T, (0,1), axis=0)
+        elif order==2 and type=='ctr':
+            T = np.delete(T, (0,mlen-1), axis=0)
+        # Need the rest of those here but those will get things started...
+    return T
 
 
 """
@@ -132,14 +190,69 @@ class InvT0(BaseEstimator):
         # X is the Jacobian matrix of derivs of predicted data points wrt model
         # params m, as given by ypred,X=self.fwd_deriv_code(m)...
 
+
         if alg=='optls':
-            # (in progress...)
-            # x,cov_x,infodict,mesg,ier =
-            # leastsq(func, x0, args=(), Dfun=None, full_output=0, col_deriv=0,
-            # ftol=1.49012e-08, xtol=1.49012e-08, gtol=0.0, maxfev=0, epsfcn=None,
-            # factor=100, diag=None)
-            #
-            # m,cost,misfit,modelnorm,norm(dm),testMSE
+            # https://docs.scipy.org/doc/scipy/reference/optimize.html
+            # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html
+            def fun(m):
+                mlen = m.size
+                L = fd_mtx(mlen,'fwd',2,bounds=False)  # 2nd finite diff matrix
+                L = np.concatenate((L,np.eye(mlen)),axis=0)  # append ridge regr too
+                ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
+                resids = ymeas-ypred
+                modelfunc = self.alpha * np.dot(L,m)
+                modelfunc = modelfunc.reshape(len(modelfunc),1)
+                f = np.squeeze(np.concatenate((resids,modelfunc),axis=0))
+                return f
+
+            def jac(m):
+                mlen = m.size
+                L = fd_mtx(mlen,'fwd',2,bounds=False)  # 2nd finite diff matrix
+                L = np.concatenate((L,np.eye(mlen)),axis=0)  # append ridge regr too
+                ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
+                Jreg = self.alpha * L
+                Jout = np.concatenate((J,Jreg))
+                return Jout
+
+            res = least_squares(fun, np.squeeze(self.minit), jac='2-point',  # jac=jac,  #
+                bounds=(0., 5.), diff_step=None, verbose=2, max_nfev=100,
+                method='trf', ftol=1e-3, xtol=1e-2, gtol=1e-8, x_scale=1.0)
+                #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
+                #ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
+
+            if mtrue is not None:
+                testMSE = cplxMSE(res.x.reshape(len(res.x),1),mtrue)
+            else:
+                testMSE = npl.nan
+            ypred,J = self.fwd_deriv_code(res.x.reshape(len(res.x),1))
+            residnorm = norm(ypred-ymeas)
+            print('resid norm',residnorm)
+            L = fd_mtx(len(mtrue),'fwd',2,bounds=False)  # 2nd finite diff matrix
+            L = np.concatenate((L,np.eye(len(mtrue))),axis=0)  # append ridge regr too
+            print('maxeig JJ',np.amax(np.linalg.eigvals(np.dot(J.T,J))))
+            print('maxeig LL',np.amax(np.linalg.eigvals(np.dot(L.T,L))))
+            if self.showplot:
+                f, ax = plt.subplots(1, 2, figsize=(11,4))
+                # plot the meas and pred data:
+                print('ypred',ypred)
+                print('ymeas',ymeas)
+                ax[0].plot(ypred,'bo-')
+                ax[0].plot(ymeas,'k.-')
+                ax[0].grid()
+                #ax[0].set_ylabel('cost')
+                #ax[0].set_xlabel('iterations')
+                ax[0].set_title('Measured (blk) and predicted (blu) data')
+                # plot the init, true, and final model param vectors:
+                ax[1].plot(mtrue,'k.-')
+                ax[1].plot(self.minit,'g.-')
+                ax[1].plot(res.x,'r.-')
+                ax[1].grid()
+                #ax[1].set_ylabel('model value')
+                #ax[1].set_xlabel('indep var')
+                ax[1].set_title('Model vectors (true=blk, init=grn, soln=red)')
+
+            # return m,cost,misfit,modelnorm,norm(dm),testMSE
+            return res.x,res.cost,np.nan,np.nan,np.nan,testMSE
 
         elif alg=='mine':
             cost = []
@@ -153,13 +266,14 @@ class InvT0(BaseEstimator):
                     def tmpfwdcode(m):
                         return np.squeeze(self.fwd_deriv_code(m)[0])
                     X = jacfindiff(tmpfwdcode,m,dx=1.0e-6)  # dx=1.0e-6 is problem dependent!
-                G = np.concatenate((X, -self.alpha*np.eye(mlen)),axis=0)
-                D = np.concatenate((ymeas-ypred, self.alpha*m),axis=0)
+                G = np.concatenate((X, -self.alpha*L),axis=0)
+                D = np.concatenate((ymeas-ypred, self.alpha*np.dot(L,m)),axis=0)
                 misfit = cplxMSE(ymeas, ypred)
-                modelnorm = norm(m)**2
-                cost.append(misfit + pow(self.alpha,2)*modelnorm)
+                modelnorm = norm(np.dot(L,m))**2
+                current_cost = misfit + pow(self.alpha,2)*modelnorm
                 dm,res,rnk,sv = lstsq(G,D)
                 m = m + dm
+                cost.append(current_cost)
                 if self.verbose:
                     print('%6.1g  %10.2g  %10.2g  %10.2g  %6.3f' %
                         (self.alpha, cost[-1], norm(ymeas-ypred), norm(dm), self.tol))
@@ -181,15 +295,15 @@ class InvT0(BaseEstimator):
                 ax[0].set_title('Loss history  (misfit + alpha*modelnorm)')
                 # plot the init, true, final, and evolution of model params:
                 #print('m',np.squeeze(m.T))
-                ax[1].plot(1/mtrue,'k')
-                ax[1].plot(1/self.minit,'g')
-                ax[1].plot(1/m,'r')
+                ax[1].plot(mtrue,'k')
+                ax[1].plot(self.minit,'g')
+                ax[1].plot(m,'r')
                 ax[1].grid()
-                ax[1].set_ylabel('model value')
+                #ax[1].set_ylabel('model value')
                 ax[1].set_xlabel('indep var')
                 ax[1].set_title('Model vectors')
 
-        return m,cost,misfit,modelnorm,norm(dm),testMSE
+        return m,cost[-1],misfit,modelnorm,norm(dm),testMSE
 
 
     def get_hyperparams(self):
