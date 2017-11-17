@@ -25,6 +25,21 @@ def convert_deriv_to_mag(J,m):
     return Jmag
 
 
+def convert_deriv_to_log10(J,m):
+    """
+    Convert jacobian matrix of complex derivatives of predicted values wrt model params
+    to a jacobian matrix of derivatives of the log10 of the predicted values wrt
+    model parameters.
+    Requires inputs of both jacobian matrix J and model params m at which J is valid.
+    (ie since typically this is used for a locally-linearized nonlinear model.)
+    Assumes dims NxM for N predicted values and M model parameters.
+    Assumes m and J are already real-valued.
+    """
+    Jlog = np.log10(np.exp(1.0)) * J /m
+    # That /m divides element-wise into every column the matrix via Python's broadcasting.
+    return Jlog
+
+
 def separate_cplx(x):
     # (check if x is complex here...)
     if x.ndim==1:
@@ -131,6 +146,13 @@ def fd_mtx(mlen,type='fwd',order=2,bounds=False):
     return T
 
 
+def create_findiff_mtx(mlen,beta):
+    L = fd_mtx(mlen,'fwd',2,bounds=False)  # 2nd finite diff matrix
+    L = np.delete(L, (0), axis=0)  # don't smooth first param at btm interface
+    #L = np.concatenate((L,beta*np.eye(mlen)),axis=0)  # append ridge regr too
+    return L
+
+
 """
 Inversion model classes based on LinearRegression from scikit-learn.
 It's almost not worth importing skl, but it does have multiple solution methods.
@@ -147,13 +169,14 @@ class InvT0(BaseEstimator):
     demo_param : str, optional
         A parameter used for demonstation of how to pass and store paramters.
     """
-    def __init__(self, fwd_deriv_code, minit, alpha=0.01, max_iter=5, tol=0.001,
-                 usefindiff=False, showplot=True, verbose=True):
+    def __init__(self, fwd_deriv_code, minit, alpha=0.01, beta=50., max_iter=5,
+                 dmtol=0.001, usefindiff=False, showplot=True, verbose=True):
         self.fwd_deriv_code = fwd_deriv_code
         self.minit = minit
         self.max_iter = max_iter  # only relevant after expanding this to nonlinear
         self.alpha = alpha
-        self.tol = tol  # only relevant after expanding this to nonlinear
+        self.beta = beta
+        self.dmtol = dmtol  # only relevant after expanding this to nonlinear
         self.usefindiff = usefindiff
         self.showplot = showplot
         self.verbose = verbose
@@ -196,8 +219,7 @@ class InvT0(BaseEstimator):
             # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html
             def fun(m):
                 mlen = m.size
-                L = fd_mtx(mlen,'fwd',2,bounds=False)  # 2nd finite diff matrix
-                L = np.concatenate((L,np.eye(mlen)),axis=0)  # append ridge regr too
+                L = create_findiff_mtx(mlen,self.beta)
                 ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
                 resids = ymeas-ypred
                 modelfunc = self.alpha * np.dot(L,m)
@@ -207,16 +229,24 @@ class InvT0(BaseEstimator):
 
             def jac(m):
                 mlen = m.size
-                L = fd_mtx(mlen,'fwd',2,bounds=False)  # 2nd finite diff matrix
-                L = np.concatenate((L,np.eye(mlen)),axis=0)  # append ridge regr too
+                L = create_findiff_mtx(mlen,self.beta)
                 ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
                 Jreg = self.alpha * L
                 Jout = np.concatenate((J,Jreg))
                 return Jout
 
-            res = least_squares(fun, np.squeeze(self.minit), jac='2-point',  # jac=jac,  #
-                bounds=(0., 5.), diff_step=None, verbose=2, max_nfev=100,
-                method='trf', ftol=1e-3, xtol=1e-2, gtol=1e-8, x_scale=1.0)
+            if self.usefindiff:
+                jacfn='2-point'
+            else:
+                jacfn=jac
+            if self.verbose:
+                verblevel=2
+            else:
+                verblevel=0
+            res = least_squares(fun, np.squeeze(self.minit), jac=jacfn,
+                bounds=(0., 3.5), diff_step=None, verbose=verblevel, max_nfev=self.max_iter,
+                method='trf', ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
+                #ftol=1e-4, xtol=1e-1, gtol=1e-8, x_scale=1.0)
                 #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
                 #ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
 
@@ -225,27 +255,27 @@ class InvT0(BaseEstimator):
             else:
                 testMSE = npl.nan
             ypred,J = self.fwd_deriv_code(res.x.reshape(len(res.x),1))
+            ypred=np.log10(ypred)
             residnorm = norm(ypred-ymeas)
             print('resid norm',residnorm)
-            L = fd_mtx(len(mtrue),'fwd',2,bounds=False)  # 2nd finite diff matrix
-            L = np.concatenate((L,np.eye(len(mtrue))),axis=0)  # append ridge regr too
-            print('maxeig JJ',np.amax(np.linalg.eigvals(np.dot(J.T,J))))
+            L = create_findiff_mtx(len(self.minit),self.beta)
+            print('maxeig JJ',np.real(np.amax(np.linalg.eigvals(np.dot(J.T,J)))))  # J'J has real eigvals but kept cplx type
             print('maxeig LL',np.amax(np.linalg.eigvals(np.dot(L.T,L))))
             if self.showplot:
                 f, ax = plt.subplots(1, 2, figsize=(11,4))
                 # plot the meas and pred data:
-                print('ypred',ypred)
-                print('ymeas',ymeas)
-                ax[0].plot(ypred,'bo-')
+                # print('ypred',ypred)
+                # print('ymeas',ymeas)
+                ax[0].plot(ypred,'r.-')
                 ax[0].plot(ymeas,'k.-')
                 ax[0].grid()
                 #ax[0].set_ylabel('cost')
                 #ax[0].set_xlabel('iterations')
                 ax[0].set_title('Measured (blk) and predicted (blu) data')
                 # plot the init, true, and final model param vectors:
-                ax[1].plot(mtrue,'k.-')
                 ax[1].plot(self.minit,'g.-')
-                ax[1].plot(res.x,'r.-')
+                ax[1].plot(res.x,'r.--')
+                ax[1].plot(mtrue,'k.--')
                 ax[1].grid()
                 #ax[1].set_ylabel('model value')
                 #ax[1].set_xlabel('indep var')
@@ -259,13 +289,14 @@ class InvT0(BaseEstimator):
             m = self.minit
             mlen = len(m)
             if self.verbose:
-                print(' alpha      cost       norm(dd)    norm(dm)   tol')
+                print('iter  alpha      cost       norm(dd)    norm(dm)   dmtol')
             for i in range(self.max_iter):
                 ypred,X = self.fwd_deriv_code(m)  # m: model params vector, X: derivs matrix
                 if self.usefindiff:
                     def tmpfwdcode(m):
                         return np.squeeze(self.fwd_deriv_code(m)[0])
                     X = jacfindiff(tmpfwdcode,m,dx=1.0e-6)  # dx=1.0e-6 is problem dependent!
+                L = create_findiff_mtx(mlen,self.beta)
                 G = np.concatenate((X, -self.alpha*L),axis=0)
                 D = np.concatenate((ymeas-ypred, self.alpha*np.dot(L,m)),axis=0)
                 misfit = cplxMSE(ymeas, ypred)
@@ -275,16 +306,18 @@ class InvT0(BaseEstimator):
                 m = m + dm
                 cost.append(current_cost)
                 if self.verbose:
-                    print('%6.1g  %10.2g  %10.2g  %10.2g  %6.3f' %
-                        (self.alpha, cost[-1], norm(ymeas-ypred), norm(dm), self.tol))
-                if norm(dm) < self.tol:
+                    print('%3d  %6.1g  %10.3f  %10.3f  %10.2g  %6.3g' %
+                        (i, self.alpha, current_cost, norm(ymeas-ypred), norm(dm), self.dmtol))
+                if norm(dm) < self.dmtol:
                    break
-                self.G = G
-                self.ypred = ypred
-                if mtrue is not None:
-                    testMSE = cplxMSE(m,mtrue)
-                else:
-                    testMSE = npl.nan
+            self.G = G
+            self.ypred = ypred
+            if mtrue is not None:
+                testMSE = cplxMSE(m,mtrue)
+            else:
+                testMSE = npl.nan
+            print('maxeig JJ',np.real(np.amax(np.linalg.eigvals(np.dot(X.T,X)))))  # X'X has real eigvals but kept cplx type
+            print('maxeig LL',np.amax(np.linalg.eigvals(np.dot(L.T,L))))
             if self.showplot:
                 f, ax = plt.subplots(1, 2, figsize=(11,4))
                 # plot the cost (ie loss) per iterations:
@@ -292,7 +325,7 @@ class InvT0(BaseEstimator):
                 ax[0].grid()
                 ax[0].set_ylabel('cost')
                 ax[0].set_xlabel('iterations')
-                ax[0].set_title('Loss history  (misfit + alpha*modelnorm)')
+                ax[0].set_title('Cost history  (misfit^2 + alpha^2*modelnorm^2)')
                 # plot the init, true, final, and evolution of model params:
                 #print('m',np.squeeze(m.T))
                 ax[1].plot(mtrue,'k')
@@ -307,4 +340,4 @@ class InvT0(BaseEstimator):
 
 
     def get_hyperparams(self):
-        return (self.max_iter, self.tol, self.alpha)
+        return (self.max_iter, self.dmtol, self.alpha)
