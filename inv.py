@@ -1,6 +1,6 @@
 import math
 import numpy as np
-from numpy.linalg import norm, lstsq
+from numpy.linalg import norm, lstsq, inv, cholesky
 from scipy.linalg import toeplitz
 from scipy.optimize import least_squares
 import matplotlib.pyplot as plt
@@ -153,17 +153,9 @@ def create_findiff_mtx(mlen,beta):
     return L
 
 
-"""
-Inversion model classes based on LinearRegression from scikit-learn.
-It's almost not worth importing skl, but it does have multiple solution methods.
-For inversion, the X is no longer from the data, it's the Jacobian matrix of
-derivatives, and the model coeffs are the desired inverted sal profiles.
-Replacing predict() method to use the X (derviatives) at the model coeffs
-solution, with those coeffs, to produce the predicted data.
-"""
 
-class InvT0(BaseEstimator):
-    """ Linear inversion using Tikhonov regularization.
+class InvTF(BaseEstimator):
+    """ Frequentist inversion for weakly nonlinear problems using Tikhonov regularization.
     Parameters
     ----------
     demo_param : str, optional
@@ -183,7 +175,7 @@ class InvT0(BaseEstimator):
         #super().__init__(fit_intercept=False, copy_X=True)
         #super(InvT0, self).__init__(self, fit_intercept=False, copy_X=True)
 
-    def fit(self, ymeas, mtrue=None, alg='optls'):   # alg: {'optls','mine'}
+    def fit(self, ymeas, mmeas=None, alg='optls'):   # alg: {'optls','mine'}
         """A reference implementation of a fitting function
         Parameters
         ----------
@@ -250,8 +242,8 @@ class InvT0(BaseEstimator):
                 #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
                 #ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
 
-            if mtrue is not None:
-                testMSE = cplxMSE(res.x.reshape(len(res.x),1),mtrue)
+            if mmeas is not None:
+                testMSE = cplxMSE(res.x.reshape(len(res.x),1),mmeas)
             else:
                 testMSE = npl.nan
             ypred,J = self.fwd_deriv_code(res.x.reshape(len(res.x),1))
@@ -275,7 +267,7 @@ class InvT0(BaseEstimator):
                 # plot the init, true, and final model param vectors:
                 ax[1].plot(self.minit,'g.-')
                 ax[1].plot(res.x,'r.--')
-                ax[1].plot(mtrue,'k.--')
+                ax[1].plot(mmeas,'k.--')
                 ax[1].grid()
                 #ax[1].set_ylabel('model value')
                 #ax[1].set_xlabel('indep var')
@@ -312,8 +304,8 @@ class InvT0(BaseEstimator):
                    break
             self.G = G
             self.ypred = ypred
-            if mtrue is not None:
-                testMSE = cplxMSE(m,mtrue)
+            if mmeas is not None:
+                testMSE = cplxMSE(m,mmeas)
             else:
                 testMSE = npl.nan
             print('maxeig JJ',np.real(np.amax(np.linalg.eigvals(np.dot(X.T,X)))))  # X'X has real eigvals but kept cplx type
@@ -328,7 +320,7 @@ class InvT0(BaseEstimator):
                 ax[0].set_title('Cost history  (misfit^2 + alpha^2*modelnorm^2)')
                 # plot the init, true, final, and evolution of model params:
                 #print('m',np.squeeze(m.T))
-                ax[1].plot(mtrue,'k')
+                ax[1].plot(mmeas,'k')
                 ax[1].plot(self.minit,'g')
                 ax[1].plot(m,'r')
                 ax[1].grid()
@@ -341,3 +333,111 @@ class InvT0(BaseEstimator):
 
     def get_hyperparams(self):
         return (self.max_iter, self.dmtol, self.alpha)
+
+
+
+class InvTB(BaseEstimator):
+    """ Bayesian inversion for weakly nonlinear problem using Tikhonov regularization.
+    Parameters
+    ----------
+    demo_param : str, optional
+        A parameter used for demonstation of how to pass and store paramters.
+    """
+    def __init__(self, fwd_deriv_code, minit, mprior, Cprior, max_iter=5,
+                 dmtol=0.001, usefindiff=False, showplot=True, verbose=True):
+        self.fwd_deriv_code = fwd_deriv_code
+        self.minit = minit
+        self.mprior = mprior
+        self.Cprior = Cprior
+        self.max_iter = max_iter
+        self.dmtol = dmtol
+        self.usefindiff = usefindiff
+        self.showplot = showplot
+        self.verbose = verbose
+
+    def fit(self, ymeas, mmeas=None):
+        """A reference implementation of a fitting function
+        Parameters
+        ----------
+        X : array-like or sparse matrix of shape = [n_samples, n_features]
+            The training input samples.
+        y : array-like, shape = [n_samples] or [n_samples, n_outputs]
+            The target values (class labels in classification, real numbers in
+            regression).
+        Returns
+        -------
+        self : object
+            Returns self.
+        """
+
+        Cinvchol = cholesky(inv(self.Cprior)).T
+
+        # https://docs.scipy.org/doc/scipy/reference/optimize.html
+        # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html
+        def fun(m):
+            mlen = m.size
+            ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
+            resids = ymeas-ypred
+            modelfunc = np.dot(Cinvchol,m) #np.subtract(m,np.squeeze(self.mprior)))
+            modelfunc = modelfunc.reshape(len(modelfunc),1)
+            f = np.squeeze(np.concatenate((resids,modelfunc),axis=0))
+            return f
+
+        def jac(m):
+            mlen = m.size
+            ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
+            Jreg = Cinvchol
+            Jout = np.concatenate((J,Jreg))
+            return Jout
+
+        if self.usefindiff:
+            jacfn='2-point'
+        else:
+            jacfn=jac
+        if self.verbose:
+            verblevel=2
+        else:
+            verblevel=0
+        res = least_squares(fun, np.squeeze(self.minit), jac=jacfn,
+            bounds=(0., 3.5), diff_step=None, verbose=verblevel, max_nfev=self.max_iter,
+            method='trf', ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
+            #ftol=1e-4, xtol=1e-1, gtol=1e-8, x_scale=1.0)
+            #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
+            #ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
+
+        if mmeas is not None:
+            testMSE = cplxMSE(res.x.reshape(len(res.x),1),mmeas)
+        else:
+            testMSE = npl.nan
+        ypred,J = self.fwd_deriv_code(res.x.reshape(len(res.x),1))
+        ypred=np.log10(ypred)
+        residnorm = norm(ypred-ymeas)
+        print('resid norm',residnorm)
+        #print('maxeig JJ',np.real(np.amax(np.linalg.eigvals(np.dot(J.T,J)))))  # J'J has real eigvals but kept cplx type
+        #print('maxeig Cinv',np.amax(np.linalg.eigvals(np.dot(Cinvchol.T,Cinvchol))))
+        if self.showplot:
+            f, ax = plt.subplots(1, 2, figsize=(11,4))
+            # plot the meas and pred data:
+            # print('ypred',ypred)
+            # print('ymeas',ymeas)
+            ax[0].plot(ypred,'r.-')
+            ax[0].plot(ymeas,'k.-')
+            ax[0].grid()
+            #ax[0].set_ylabel('cost')
+            #ax[0].set_xlabel('iterations')
+            ax[0].set_title('Measured (blk) and predicted (blu) data')
+            # plot the init, true, and final model param vectors:
+            ax[1].plot(self.minit,'g.-')
+            ax[1].plot(res.x,'r.--')
+            ax[1].plot(mmeas,'k.--')
+            ax[1].grid()
+            #ax[1].set_ylabel('model value')
+            #ax[1].set_xlabel('indep var')
+            ax[1].set_title('Model vectors (true=blk, init=grn, soln=red)')
+
+        # return m,cost,misfit,modelnorm,norm(dm),testMSE
+        return res.x,res.cost,np.nan,np.nan,np.nan,testMSE
+
+
+    def get_hyperparams(self):
+        return (self.max_iter, self.dmtol)
