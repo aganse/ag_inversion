@@ -16,7 +16,7 @@ def convert_deriv_to_mag(J,dpred):
     (ie since typically this is used for a locally-linearized nonlinear model.)
     Assumes dims NxM for N predicted values and M model parameters
     """
-    # Hm, this expression is quite off when comparing to findiffs, rederive:
+    # FIXME: reverify this equation!
     # Jmag = [np.conj(m) * J  +  m * np.conj(J)]  /2/np.abs(m)
     Jmag = np.add( np.dot(np.conj(dpred.T),J) , np.dot(dpred.T,np.conj(J)) ) /2/np.abs(dpred)
     Jmag = np.real(Jmag)  # just stripping off the +0.j's and setting type to real
@@ -357,7 +357,7 @@ class InvTB(BaseEstimator):
         A parameter used for demonstation of how to pass and store paramters.
     """
     def __init__(self, fwd_deriv_code, minit, mprior, Cprior, lb=-np.inf, ub=np.inf,
-                 max_iter=5, dmtol=1e-8, usefindiff=False, showplot=True, verbose=True):
+                 max_iter=5, dmtol=1e-8, diff_step=None, usefindiff=False, showplot=True, verbose=True):
 
         if Cprior.ndim==1:
             self.Cprior = np.diagflat(Cprior)
@@ -369,7 +369,8 @@ class InvTB(BaseEstimator):
         self.lb = lb
         self.ub = ub
         self.max_iter = max_iter
-        self.dmtol = dmtol
+        self.xtol = dmtol
+        self.diff_step = diff_step
         self.usefindiff = usefindiff
         self.showplot = showplot
         self.verbose = verbose
@@ -425,11 +426,8 @@ class InvTB(BaseEstimator):
             verblevel=0
 
         res = least_squares(fun, np.squeeze(self.minit), jac=jacfn,
-            bounds=(self.lb, self.ub), diff_step=1e-3, verbose=verblevel, max_nfev=self.max_iter,
-            method='trf', ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
-            #ftol=1e-4, xtol=1e-1, gtol=1e-8, x_scale=1.0)
-            #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
-            #ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
+            bounds=(self.lb, self.ub), diff_step=self.diff_step, verbose=verblevel,
+            max_nfev=self.max_iter, method='trf', ftol=1e-08, xtol=self.xtol, gtol=1e-08, x_scale=1.0)
         # https://docs.scipy.org/doc/scipy/reference/optimize.html
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html
 
@@ -445,13 +443,9 @@ class InvTB(BaseEstimator):
         if self.showplot:
             f, ax = plt.subplots(1, 2, figsize=(11,4))
             # plot the meas and pred data:
-            # print('ypred',ypred)
-            # print('ymeas',ymeas)
             ax[0].plot(ypred,'r.-')
             ax[0].plot(ymeas,'k.-')
             ax[0].grid()
-            #ax[0].set_ylabel('cost')
-            #ax[0].set_xlabel('iterations')
             ax[0].set_title('Measured (blk) and predicted (red) data')
             # plot the init, true, and final model param vectors:
             ax[1].plot(self.minit,'g.-')
@@ -459,11 +453,8 @@ class InvTB(BaseEstimator):
             ax[1].plot(res.x,'r.--')
             ax[1].plot(mmeas,'k.--')
             ax[1].grid()
-            #ax[1].set_ylabel('model value')
-            #ax[1].set_xlabel('indep var')
             ax[1].set_title('Model vectors (meas=blk, pri=blu, ini=grn, sol=red)')
 
-        # return m,cost,misfit,modelnorm,norm(dm),testMSE
         return res.x,res.cost,np.nan,np.nan,np.nan,testMSE
 
 
