@@ -174,11 +174,11 @@ class InvTF(BaseEstimator):
     demo_param : str, optional
         A parameter used for demonstation of how to pass and store paramters.
     """
-    def __init__(self, fwd_deriv_code, minit, alpha=0.01, beta=50., max_iter=5,
+    def __init__(self, fwd_deriv_code, minit, alpha=0.01, beta=50., max_nfev=5,
                  dmtol=0.001, usefindiff=False, showplot=True, verbose=True):
         self.fwd_deriv_code = fwd_deriv_code
         self.minit = minit
-        self.max_iter = max_iter  # only relevant after expanding this to nonlinear
+        self.max_nfev = max_nfev  # only relevant after expanding this to nonlinear
         self.alpha = alpha
         self.beta = beta
         self.dmtol = dmtol  # only relevant after expanding this to nonlinear
@@ -249,7 +249,7 @@ class InvTF(BaseEstimator):
             else:
                 verblevel=0
             res = least_squares(fun, np.squeeze(self.minit), jac=jacfn,
-                bounds=(0., 3.5), diff_step=None, verbose=verblevel, max_nfev=self.max_iter,
+                bounds=(0., 3.5), diff_step=None, verbose=verblevel, max_nfev=self.max_nfev,
                 method='trf', ftol=1e-08, xtol=1e-08, gtol=1e-08, x_scale=1.0)
                 #ftol=1e-4, xtol=1e-1, gtol=1e-8, x_scale=1.0)
                 #ftol=1e0, xtol=1e-01, gtol=1e-01, x_scale=1.0)
@@ -295,7 +295,7 @@ class InvTF(BaseEstimator):
             mlen = len(m)
             if self.verbose:
                 print('iter  alpha      cost       norm(dd)    norm(dm)   dmtol')
-            for i in range(self.max_iter):
+            for i in range(self.max_nfev):
                 ypred,X = self.fwd_deriv_code(m)  # m: model params vector, X: derivs matrix
                 if self.usefindiff:
                     def tmpfwdcode(m):
@@ -345,7 +345,7 @@ class InvTF(BaseEstimator):
 
 
     def get_hyperparams(self):
-        return (self.max_iter, self.dmtol, self.alpha)
+        return (self.max_nfev, self.dmtol, self.alpha)
 
 
 
@@ -357,7 +357,7 @@ class InvTB(BaseEstimator):
         A parameter used for demonstation of how to pass and store paramters.
     """
     def __init__(self, fwd_deriv_code, minit, mprior, Cprior, lb=-np.inf, ub=np.inf,
-                 max_iter=5, dmtol=1e-8, diff_step=None, usefindiff=False, showplot=True, verbose=True):
+                 max_nfev=5, dmtol=1e-8, diff_step=None, usefindiff=False, showplot=True, verbose=True):
 
         if Cprior.ndim==1:
             self.Cprior = np.diagflat(Cprior)
@@ -368,7 +368,7 @@ class InvTB(BaseEstimator):
         self.mprior = mprior
         self.lb = lb
         self.ub = ub
-        self.max_iter = max_iter
+        self.max_nfev = max_nfev
         self.xtol = dmtol
         self.diff_step = diff_step
         self.usefindiff = usefindiff
@@ -401,7 +401,7 @@ class InvTB(BaseEstimator):
         def fun(m):
             mlen = m.size
             ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
-            resids = ymeas-ypred  #ypred-ymeas
+            resids = ypred-ymeas
             resids = np.dot(Dinvsqrt,resids)
             modelfunc = np.dot(Cinvsqrt,np.subtract(m,np.squeeze(self.mprior)))
             modelfunc = modelfunc.reshape(len(modelfunc),1)
@@ -411,6 +411,7 @@ class InvTB(BaseEstimator):
         def jac(m):
             mlen = m.size
             ypred,J = self.fwd_deriv_code(m)  # m: model params vector, J: derivs matrix
+            J = np.flipud(J)  # was this needed?
             J = np.dot(Dinvsqrt,J)
             Jreg = Cinvsqrt
             Jout = np.concatenate((J,Jreg))
@@ -427,7 +428,7 @@ class InvTB(BaseEstimator):
 
         res = least_squares(fun, np.squeeze(self.minit), jac=jacfn,
             bounds=(self.lb, self.ub), diff_step=self.diff_step, verbose=verblevel,
-            max_nfev=self.max_iter, method='trf', ftol=1e-08, xtol=self.xtol, gtol=1e-08, x_scale=1.0)
+            max_nfev=self.max_nfev, method='trf', ftol=1e-08, xtol=self.xtol, gtol=1e-08, x_scale=1.0)
         # https://docs.scipy.org/doc/scipy/reference/optimize.html
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html
 
@@ -436,7 +437,9 @@ class InvTB(BaseEstimator):
         else:
             testMSE = npl.nan
         ypred,J = self.fwd_deriv_code(res.x.reshape(len(res.x),1))
-        residnorm = norm(ypred-ymeas)
+        resids = ymeas-ypred
+        resids = np.dot(Dinvsqrt,resids)
+        residnorm = norm(resids)
         #print('resid norm',residnorm)
         #print('maxeig JJ',np.real(np.amax(np.linalg.eigvals(np.dot(J.T,J)))))  # J'J has real eigvals but kept cplx type
         #print('maxeig Cinv',np.amax(np.linalg.eigvals(np.dot(Cinvsqrt.T,Cinvsqrt))))
@@ -455,8 +458,8 @@ class InvTB(BaseEstimator):
             ax[1].grid()
             ax[1].set_title('Model vectors (meas=blk, pri=blu, ini=grn, sol=red)')
 
-        return res.x,res.cost,np.nan,np.nan,np.nan,testMSE
+        return res.x,res.cost,residnorm,np.nan,np.nan,testMSE,ypred,ymeas,J
 
 
     def get_hyperparams(self):
-        return (self.max_iter, self.dmtol)
+        return (self.max_nfev, self.dmtol)
